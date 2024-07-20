@@ -5,7 +5,10 @@ classdef Collocation1D < handle
 
     properties                     
         dep_num  ;      % m, number of dependent variables
-        A1 ; A2 ; A0 ;  % coefficient matrices
+        num_eq   ;      % number of equations
+        num_cond ;      % number of conditions
+        A1 ; A0 ;  % coefficient matrices
+        B1 ; B0 ;  % coefficient matrices for boundary
         f  ; g  ;       % force term and boundary term
         Omega ;         % Omega = [a,b]
        
@@ -26,22 +29,44 @@ classdef Collocation1D < handle
 
     methods
 
-        function obj = Collocation1D(dep_num, A1, A0, f, g, Omega, u, Du) 
+        function obj = Collocation1D(dep_num, Omega, ...
+                                     A1, A0, f, num_eq, ...
+                                     B1, B0, g, num_cond, ...
+                                     u, Du) 
             
             arguments 
                 dep_num
-                A1
-                A0
-                f
-                g
                 Omega
+
+                A1 = []
+                A0 = []
+                f = [] 
+                num_eq = []
+                B1 = []
+                B0 = []
+                g = []
+                num_cond = []
+                
                 u = []
                 Du = []
             end
             
             obj.dep_num = dep_num ;
             obj.A1 = A1 ; obj.A0 = A0 ; 
-            obj.f = f ; obj.g = g ;
+            obj.B1 = B1 ; obj.B0 = B0 ; 
+            obj.f = f   ; obj.g = g ;
+
+            if isempty(num_eq)
+                obj.num_eq = dep_num ;
+            else
+                obj.num_eq = num_eq ; 
+            end
+
+            if isempty(num_cond)
+                obj.num_cond = dep_num ;
+            else
+                obj.num_cond = num_cond ;
+            end
 
             obj.u = u ;
             obj.Du = Du ;
@@ -49,7 +74,58 @@ classdef Collocation1D < handle
             obj.Omega = Omega ;
         end
 
+        % This function fit interior conditions after model construction
+        function fitInterior(obj, A1, A0, f, num_eq)
+           arguments 
+                obj
+                A1 
+                A0 
+                f 
+                num_eq = obj.dep_num
+            end
+            obj.A1 = A1 ; obj.A0 = A0 ; obj.f = f;
+            obj.num_eq = num_eq ;
+        end
 
+        % This function fit boundary conditions after model construction
+        function fitBoundary(obj, B1, B0, g, num_cond)
+            arguments 
+                obj
+                B1 
+                B0 
+                g 
+                num_cond = obj.dep_num
+            end
+
+            obj.num_cond = num_cond;
+
+            if isempty(B1)
+                obj.B1 = @(x,y) zeros(obj.num_cond, obj.dep_num);
+            else
+                obj.B1 = B1; 
+            end
+
+            if isempty(B0)
+                obj.B0 = @(x,y) eye(obj.num_cond);
+            else
+                obj.B0 = B0; 
+            end
+            
+            obj.g = g ; 
+        end
+
+        % This function fit solution benchmark after model construction
+        function fitTrueSol(obj, u, Du)
+            arguments 
+                obj
+                u
+                Du = []
+            end
+
+            obj.u = u ; obj.Du = Du ;
+        end
+
+        
         % This function construct a simple uniform mesh for the domian CG1.
         function linear_discretize(obj, n)
 
@@ -63,19 +139,35 @@ classdef Collocation1D < handle
         
         end
 
-    
+ 
         % This function evaluates B_Omega locally.
-        function res = B_Omega_loc(obj, x, eleID)
+        function res = B_loc(obj, x, eleID, position, Lambda)
+            % if position == 0 evaluate interior; if position == 1 evaluate
+            % boundary
+            
+            arguments 
+                obj
+                x              
+                eleID              
+                position = 0       
+                Lambda = eye(obj.num_cond)
+            end
 
             v_globID = obj.gm.Mesh.Elements(:, eleID);
             v = obj.gm.Mesh.Nodes(v_globID) ;
             l_loc  = v(end) - v(1) ;
        
-            if strcmpi(obj.gm.Mesh.GeometricOrder, 'linear')
-                B1_loc = (- obj.A1(x) + (v(2) - x) * obj.A0(x) )/l_loc ;
-                B2_loc = (  obj.A1(x) + (x - v(1)) * obj.A0(x) )/l_loc ;
-            end
-        
+            if position == 0
+                if strcmpi(obj.gm.Mesh.GeometricOrder, 'linear')
+                    B1_loc = (- obj.A1(x) + (v(2) - x) * obj.A0(x) )/l_loc ;
+                    B2_loc = (  obj.A1(x) + (x - v(1)) * obj.A0(x) )/l_loc ;
+                end
+            elseif position == 1
+                if strcmpi(obj.gm.Mesh.GeometricOrder, 'linear')
+                    B1_loc = Lambda * (- obj.B1(x) + (v(2) - x) * obj.B0(x) )/l_loc ;
+                    B2_loc = Lambda * (  obj.B1(x) + (x - v(1)) * obj.B0(x) )/l_loc ;
+                end
+            end 
             res = [ B1_loc , B2_loc ] ;
         end
 
@@ -105,10 +197,10 @@ classdef Collocation1D < handle
                 x = interior_points(i) ;
                 eleID = obj.findElement(x, mesh) ;
                 iota = mesh.Elements(:, eleID) ; 
-                B_Omega{i} = obj.B_Omega_loc(x, eleID) ;
+                B_Omega{i} = obj.B_loc(x, eleID, 0) ;
                 d_Omega{i} = obj.f(x) ;
         
-                row_ID = ones(1,m) ;
+                row_ID = ones(1,obj.num_eq) ;
                 col_ID = arrayfun(@(i)(i-1)*m+1 : i*m, iota, 'UniformOutput', false) ;
                 col_ID = cat(2, col_ID{:}) ;
                 [Cols{i}, Rows{i}] = meshgrid(col_ID, row_ID) ;
@@ -133,23 +225,6 @@ classdef Collocation1D < handle
                 obj.Omega_assemble.N = N_Omega_modified;
             end
         
-        end
-
-
-        % This function evaluates B_Gamma locally.
-        function res = B_Gamma_loc(obj, x, eleID, Lambda)
-            
-            v_globID = obj.gm.Mesh.Elements(:,eleID) ;
-            v = obj.gm.Mesh.Nodes(v_globID) ;
-            
-            l_loc  = v(end) - v(1) ;
-            
-            if strcmpi(obj.gm.Mesh.GeometricOrder, 'linear')
-                B1_loc = (v(2) - x)/l_loc * Lambda ;
-                B2_loc = (x - v(1))/l_loc * Lambda ;
-            end
-
-            res = [ B1_loc , B2_loc ] ;
         end
 
 
@@ -182,10 +257,10 @@ classdef Collocation1D < handle
                 eleID = obj.findElement(x, mesh) ;
         
                 iota = mesh.Elements(:, eleID) ; 
-                B_Gamma{i} = obj.B_Gamma_loc(x, eleID, Lambda) ;
+                B_Gamma{i} = obj.B_loc(x, eleID, 1, Lambda) ;
                 d_Gamma{i} = Lambda*obj.g(x) ;
         
-                row_ID = ones(1,m) ;
+                row_ID = ones(1,obj.num_cond) ;
                 col_ID = arrayfun(@(i)(i-1)*m+1 : i*m, iota, 'UniformOutput', false) ;
                 col_ID = cat(2, col_ID{:}) ;
                 [Cols{i}, Rows{i}] = meshgrid(col_ID, row_ID) ;

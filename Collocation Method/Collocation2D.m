@@ -5,9 +5,14 @@ classdef Collocation2D < handle
 
     properties                     
         dep_num  ;      % m, number of dependent variables
-        A1 ; A2 ; A0 ;  % coefficient matrices
+        num_eq   ;      % number of equations
+        num_cond ;      % number of conditions
+        A1 ; A2 ; A0 ;  % coefficient matrices for interior
+        B1 ; B2 ; B0 ;  % coefficient matrices for boundary
         f  ; g  ;       % force term and boundary term
         Omega ;         % polygonal domain Omega = polyshape({Gamma1X, ...}, {Gamma1Y, ...})
+        BoundaryNodeIDs ;
+        Edges ;
        
         u ;             % true solution and its derivatives (if given). 
         Dx_u ;
@@ -27,16 +32,24 @@ classdef Collocation2D < handle
 
     methods
 
-        function obj = Collocation2D(dep_num, A1, A2, A0, f, g, Omega, u, Dx_u, Dy_u) 
+        function obj = Collocation2D(dep_num, Omega, ...
+                                     A1, A2, A0, f, num_eq,...
+                                     B1, B2, B0, g, num_cond,...
+                                     u, Dx_u, Dy_u) 
             
             arguments 
                 dep_num
-                A1
-                A2
-                A0
-                f
-                g
                 Omega
+                A1 = []
+                A2 = []
+                A0 = []
+                f = [] 
+                num_eq = []
+                B1 = []
+                B2 = []
+                B0 = []
+                g = []
+                num_cond = []
                 u = []
                 Dx_u = []
                 Dy_u = []
@@ -44,8 +57,21 @@ classdef Collocation2D < handle
             
             obj.dep_num = dep_num ;
             obj.A1 = A1 ; obj.A2 = A2 ; obj.A0 = A0 ; 
+            obj.B1 = B1 ; obj.B2 = B2 ; obj.B0 = B0 ; 
             obj.f = f ; obj.g = g ;
 
+            if isempty(num_eq)
+                obj.num_eq = dep_num ;
+            else
+                obj.num_eq = num_eq ; 
+            end
+
+            if isempty(num_cond)
+                obj.num_cond = dep_num ;
+            else
+                obj.num_cond = num_cond ;
+            end
+ 
             obj.u = u ;
             obj.Dx_u = Dx_u ;
             obj.Dy_u = Dy_u ;
@@ -53,6 +79,68 @@ classdef Collocation2D < handle
             obj.Omega = Omega ;
             tr = triangulation(obj.Omega) ; 
             obj.gm = fegeometry(tr) ; 
+        end
+
+        % This function fit interior conditions after model construction
+        function fitInterior(obj, A1, A2, A0, f, num_eq)
+           arguments 
+                obj
+                A1 
+                A2 
+                A0 
+                f 
+                num_eq = obj.dep_num
+            end
+            obj.A1 = A1 ; obj.A2 = A2 ; obj.A0 = A0 ; obj.f = f;
+            obj.num_eq = num_eq ;
+        end
+
+        % This function fit boundary conditions after model construction
+        function fitBoundary(obj, B1, B2, B0, g, num_cond)
+            arguments 
+                obj
+                B1 
+                B2 
+                B0 
+                g 
+                num_cond = obj.dep_num
+            end
+
+            obj.num_cond = num_cond;
+
+            if isempty(B1)
+                obj.B1 = @(x,y) zeros(obj.num_cond, obj.dep_num);
+            else
+                obj.B1 = B1; 
+            end
+
+            if isempty(B2)
+                obj.B2 = @(x,y) zeros(obj.num_cond, obj.dep_num);
+            else
+                obj.B2 = B2; 
+            end
+
+            if isempty(B0)
+                obj.B0 = @(x,y) eye(obj.num_cond);
+            else
+                obj.B0 = B0; 
+            end
+            
+            obj.g = g ; 
+        end
+
+        % This function fit solution benchmark after model construction
+        function fitTrueSol(obj, u, Dx_u, Dy_u)
+            arguments 
+                obj
+                u
+                Dx_u = []
+                Dy_u = []
+            end
+
+            
+            obj.u = u ; obj.Dx_u = Dx_u ; obj.Dy_u = Dy_u ;
+
         end
 
 
@@ -68,9 +156,21 @@ classdef Collocation2D < handle
 
             hmin=hmax/beta ;
             obj.gm = generateMesh(obj.gm, GeometricOrder=PolyOrder, Hmax=hmax, Hmin=hmin) ; % linear discretization
-            obj.basis_num = size(obj.gm.Mesh.Nodes, 2) ; 
+            obj.basis_num = size(obj.gm.Mesh.Nodes, 2)  ; 
             obj.ele_num = size(obj.gm.Mesh.Elements, 2) ;
-        
+            Elements = obj.gm.Mesh.Elements(:);
+            counts = groupcounts(Elements);
+
+            % find boundary nodes
+            obj.BoundaryNodeIDs = find(counts<=4)';
+            id_diff = [(obj.BoundaryNodeIDs(2:end) - obj.BoundaryNodeIDs(1:end-1)), 0];
+            end_id = sum(id_diff == 1) + 1;
+            obj.BoundaryNodeIDs = obj.BoundaryNodeIDs(1:end_id);
+            obj.Edges = obj.boundary_decompose();
+
+            Ex = cellfun(@(e) e(1:end-1,1), obj.Edges, 'UniformOutput', false);
+            Ey = cellfun(@(e) e(1:end-1,2), obj.Edges, 'UniformOutput', false);
+            obj.Omega = polyshape(Ex, Ey); % update Omega
         end
 
 
@@ -92,29 +192,55 @@ classdef Collocation2D < handle
 
         % This function decompose the boundary into seperate edges.
         function edge = boundary_decompose(obj)
-            edge_seperation_ID = find(all(isnan(obj.Omega.Vertices), 2)) ;
-            edge_seperation_ID = [0, edge_seperation_ID'] ;
-            edge_num = length(edge_seperation_ID) ;
-            edge = cell(1, edge_num) ;
-            for i = 1 : edge_num
-                if i < edge_num
-                    edge{i} = obj.Omega.Vertices([edge_seperation_ID(i)+1:edge_seperation_ID(i+1)-1, edge_seperation_ID(i)+1], :) ;
-                else
-                    edge{i} = obj.Omega.Vertices([edge_seperation_ID(i)+1:end, edge_seperation_ID(i)+1], :) ;
-                end
+            XY = obj.gm.Mesh.Nodes(:, obj.BoundaryNodeIDs)';
+            edge_ID = nearestEdge(obj.gm, XY);
+            edge = cell(1, obj.gm.NumEdges) ;
+            for i = 1:obj.gm.NumEdges
+                edge_node_ID = obj.BoundaryNodeIDs(edge_ID == i);
+                edge_node_coord = obj.gm.Mesh.Nodes(:,edge_node_ID)' ;
+                edge{i} = [edge_node_coord;edge_node_coord(1,:)];
             end
         end
 
     
-        % This function evaluates B_Omega locally.
-        function res = B_Omega_loc(obj, xy, eleID)
- 
+        % This function calculate the outer normal vector as a row vector for a given boundary node.
+        function n = boundary_normal(obj, xy, position)
+            arguments 
+                obj
+                xy
+                position = [1,2]
+            end
+            edgeID = nearestEdge(obj.gm, xy);
+            edge = obj.Edges{edgeID};
+            vec = edge(2:end,:) - edge(1:end-1,:);
+            ks = vec(:,2)./vec(:,1);
+            bs = edge(1:end-1,2) - ks .* edge(1:end-1,1);
+            segID = abs(ks * xy(1) + bs - xy(2)) < 1e-6;
+            vec = sum(vec(segID,:), 1);
+            n = [vec(2), -vec(1)]/norm(vec);
+            n = n(position);
+        end
+
+
+        % This function evaluates B_Omega and B_Gamma locally.
+        function res = B_loc(obj, xy, eleID, position, Lambda)
+            % if position == 0 evaluate interior; if position == 1 evaluate
+            % boundary
+            
+            arguments 
+                obj
+                xy                
+                eleID              
+                position = 0       
+                Lambda = eye(obj.num_cond)
+            end
+
             x = xy(1) ; y = xy(2) ;
             v_globID = obj.gm.Mesh.Elements(:,eleID) ;
             v = obj.gm.Mesh.Nodes(:,v_globID)' ;
         
             S_loc = det([ones(3,1), v]) ;
-        
+
             Dxphi = [v(2,2) - v(3,2), ...
                      v(3,2) - v(1,2), ...
                      v(1,2) - v(2,2)] ;
@@ -126,9 +252,15 @@ classdef Collocation2D < handle
             phi   = [det([ ones(3,1) , [ [x,y] ; v(2,:) ; v(3,:) ] ]), ...
                      det([ ones(3,1) , [ v(1,:) ; [x,y] ; v(3,:) ] ]), ...
                      det([ ones(3,1) , [ v(1,:) ; v(2,:) ; [x,y] ] ])] ;
-        
-            coeff = kron([Dxphi ; Dyphi ; phi] ./ S_loc , eye(obj.dep_num)) ;
-            res =  [obj.A1(x,y), obj.A2(x,y), obj.A0(x,y)] * coeff ;
+
+            if position == 0
+                coeff = kron([Dxphi ; Dyphi ; phi] ./ S_loc , eye(obj.dep_num));
+                res =  [obj.A1(x,y), obj.A2(x,y), obj.A0(x,y)] * coeff ;
+            elseif position == 1
+                coeff = kron([Dxphi ; Dyphi ; phi] ./ S_loc , eye(obj.dep_num));
+                res =  Lambda * [obj.B1(x,y), obj.B2(x,y), obj.B0(x,y)] * coeff;
+            end
+
         end
 
  
@@ -142,7 +274,7 @@ classdef Collocation2D < handle
            end
 
             n = obj.basis_num ;           % number of global basis
-            m = obj.dep_num ;             % number of dependent variables
+            m = obj.dep_num ;             % number of dependent variables   
             N_Omega = size(interior_points, 1) ;  % number of interior points
             mesh = obj.gm.Mesh ; 
         
@@ -162,10 +294,10 @@ classdef Collocation2D < handle
                 end
         
                 iota = mesh.Elements(:, eleID) ; 
-                B_Omega{i} = obj.B_Omega_loc(xy, eleID) ;
+                B_Omega{i} = obj.B_loc(xy, eleID, 0) ;
                 d_Omega{i} = obj.f(xy(1),xy(2)) ;
         
-                row_ID = ones(1,m) ;
+                row_ID = ones(1,obj.num_eq) ;
                 col_ID = arrayfun(@(i)(i-1)*m+1 : i*m, iota, 'UniformOutput', false) ;
                 col_ID = cat(2, col_ID{:}) ;
                 [Cols{i}, Rows{i}] = meshgrid(col_ID, row_ID) ;
@@ -184,31 +316,15 @@ classdef Collocation2D < handle
             Rows = reshape(Rows, [], 1) ;
             B_Omega = reshape(B_Omega, [], 1) ;
             B_Omega = sparse(Rows, Cols, B_Omega, maxRow, m*n) ;
-            N_Omega_modified = round(maxRow/m) ;
+            N_Omega_modified = round(maxRow/obj.num_eq) ;
+            d_Omega(any(isnan(B_Omega), 2)) = []; B_Omega(any(isnan(B_Omega), 2), :) = [];
 
             if save_result
                 obj.Omega_assemble.B = B_Omega;
                 obj.Omega_assemble.d = d_Omega;
                 obj.Omega_assemble.N = N_Omega_modified;
             end
-        
-        end
 
-
-        % This function evaluates B_Gamma locally.
-        function res = B_Gamma_loc(obj, xy, eleID, Lambda)
-            
-            x = xy(1) ; y = xy(2) ;
-            v_globID = obj.gm.Mesh.Elements(:,eleID) ;
-            v = obj.gm.Mesh.Nodes(:,v_globID)' ;
-            
-            S_loc = det([ones(3,1), v]) ;
-
-            phi   = [det([ ones(3,1) , [ [x,y] ; v(2,:) ; v(3,:) ] ]), ...
-                     det([ ones(3,1) , [ v(1,:) ; [x,y] ; v(3,:) ] ]), ...
-                     det([ ones(3,1) , [ v(1,:) ; v(2,:) ; [x,y] ] ])] ;
-
-            res = kron(phi ./ S_loc , Lambda) ;
         end
 
 
@@ -238,8 +354,8 @@ classdef Collocation2D < handle
         
             hbar = parfor_progressbar_v1(N_Gamma,'Local B_{\Gamma} calculation, please wait...') ; % progress bar
             parfor i = 1 : N_Gamma
-                xy = boundary_points(i, :) ;
-                eleID = obj.findElement(xy, mesh, obj.Omega) ;
+                xy = boundary_points(i, :);
+                eleID = obj.findElement(xy, mesh, obj.Omega);
         
         
                 if eleID == 0
@@ -247,10 +363,10 @@ classdef Collocation2D < handle
                 end
         
                 iota = mesh.Elements(:, eleID) ; 
-                B_Gamma{i} = obj.B_Gamma_loc(xy, eleID, Lambda) ;
+                B_Gamma{i} = obj.B_loc(xy, eleID, 1, Lambda) ;
                 d_Gamma{i} = Lambda*obj.g(xy(1),xy(2)) ;
-        
-                row_ID = ones(1,m) ;
+                
+                row_ID = ones(1,obj.num_cond) ;
                 col_ID = arrayfun(@(i)(i-1)*m+1 : i*m, iota, 'UniformOutput', false) ;
                 col_ID = cat(2, col_ID{:}) ;
                 [Cols{i}, Rows{i}] = meshgrid(col_ID, row_ID) ;
@@ -269,14 +385,15 @@ classdef Collocation2D < handle
             Rows = reshape(Rows, [], 1) ;
             B_Gamma = reshape(B_Gamma, [], 1) ;
             B_Gamma = sparse(Rows, Cols, B_Gamma, maxRow, m*n) ;
-            N_Gamma_modified = round(maxRow/m) ;
+            N_Gamma_modified = round(maxRow/obj.num_cond) ;
+            d_Gamma(any(isnan(B_Gamma), 2)) = []; B_Gamma(any(isnan(B_Gamma), 2), :) = [];
 
             if save_result
                 obj.Gamma_assemble.B = B_Gamma;
                 obj.Gamma_assemble.d = d_Gamma;
                 obj.Gamma_assemble.N = N_Gamma_modified;
             end
-        
+
         end
 
 
@@ -308,30 +425,78 @@ classdef Collocation2D < handle
                 end
         
             catch 
-                u_fit = 0 * C(:,1) ;
+                u_fit = NaN * C(:,1) ;
             end
         end
 
 
         % This function evaluate the vectorized numerical value according to the solution coefficient matrix C.
-        function u_fit = evaluate_LSFEM(obj, XY, C)
+        function u_fit = evaluate_LSFEM(obj, XY, C, showbar)
             % XY = [ X , Y ]  
             arguments
                 obj
                 XY
                 C = obj.C
+                showbar = true
             end
 
             u_fit = cell(1, size(XY,1)) ;
 
-            hbar = parfor_progressbar_v1(size(XY,1),'Evaluation, please wait...') ;
-            parfor i = 1 : size(XY,1)
-                u_fit{i} = obj.evaluate_LSFEM_elewise(XY(i,:), C) ;
-                hbar.iterate(1) ; 
+            if showbar
+                hbar = parfor_progressbar_v1(size(XY,1),'Evaluation, please wait...') ;
+                parfor i = 1 : size(XY,1)
+                    u_fit{i} = obj.evaluate_LSFEM_elewise(XY(i,:), C) ;
+                    hbar.iterate(1) ; 
+                end
+                close(hbar) ;
+            else
+                parfor i = 1 : size(XY,1)
+                    u_fit{i} = obj.evaluate_LSFEM_elewise(XY(i,:), C) ;
+                end
             end
-            close(hbar) ;
 
            u_fit = cat(2, u_fit{:}) ;
+        end
+
+
+        % This function evaluate the absolute error || u_true(x,y) - u_hat(x,y) ||2 at a series of fixed points.
+        function err = abs_error(obj, x, y, C)
+            arguments
+                obj
+                x
+                y
+                C = obj.C
+            end
+            [sz1,sz2] = size(x);
+            x = reshape(x, [], 1);
+            y = reshape(y, [], 1);
+            err = obj.evaluate_LSFEM([x,y], C, false) - obj.u(x', y');
+            err = sqrt(sum(err .* err, 1))';
+            err(isnan(err)) = 0;
+            err = reshape(err, sz1, sz2);
+        end
+
+        
+        % This function approximate the L2 error || u_true - u_hat ||L2.
+        function L2_err = L2_error(obj, C)
+            arguments
+                obj
+                C = obj.C
+            end
+            elements = obj.gm.Mesh.Elements;
+            nodes = obj.gm.Mesh.Nodes;
+            N = size(elements,2);
+            val = cell(1,N);
+            abserr = @(x,y) obj.abs_error(x,y,C);
+
+            parfor eleID = 1:N
+                v_globID = elements(:,eleID) ;
+                v = nodes(:,v_globID)' ;
+                [XY, W] = simplexquad(2,v);
+                err = abserr(XY(:,1), XY(:,2));
+                val{eleID} = sum((err.^2) .* W);
+            end
+            L2_err = sqrt(sum(cell2mat(val)));
         end
 
 
@@ -344,7 +509,9 @@ classdef Collocation2D < handle
             xs = linspace(min(obj.Omega.Vertices(:,1)), max(obj.Omega.Vertices(:,1)), grid_size(1));
             ys = linspace(min(obj.Omega.Vertices(:,2)), max(obj.Omega.Vertices(:,2)), grid_size(2));
             [X,Y] = meshgrid(xs,ys);
-            in = inpolygon(X, Y, obj.Omega.Vertices(:,1), obj.Omega.Vertices(:,2));
+            [in, on] = inpolygon(X, Y, obj.Omega.Vertices(:,1), obj.Omega.Vertices(:,2));
+            in = in + on;
+            in(in==0) = NaN;
             XY = [reshape(X,[],1) , reshape(Y,[],1)];
 
         end
@@ -353,6 +520,14 @@ classdef Collocation2D < handle
          % This function reshapes the vectorized c to matrix version C.
          function C = reshape2mat(obj, c)
             C = reshape(c, obj.dep_num, obj.basis_num) ;
+         end
+
+
+         % This function determin whether the point xy is in or on the discretized domain.
+         function inon = indomain(obj, xy)
+            xy = reshape(xy,2,1) ;
+            [in, on] = inpolygon(xy(1), xy(2), obj.Omega.Vertices(:,1), obj.Omega.Vertices(:,2)) ;
+            inon = (in | on)*1;
          end
 
 
