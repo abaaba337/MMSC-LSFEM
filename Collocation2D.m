@@ -554,27 +554,27 @@ classdef Collocation2D < handle
         end
 
 
-        % This function approximate the L2 error || u_true - u_hat ||L2.
-        function L2_err = L2_error(obj, C)
-            arguments
-                obj
-                C = obj.C
-            end
-            elements = obj.gm.Mesh.Elements;
-            nodes = obj.gm.Mesh.Nodes;
-            N = size(elements,2);
-            val = cell(1,N);
-            abserr = @(x,y) obj.abs_error(x,y,C);
-
-            parfor eleID = 1:N
-                v_globID = elements(:,eleID) ;
-                v = nodes(:,v_globID)' ;
-                [XY, W] = simplexquad(2,v);
-                err = abserr(XY(:,1), XY(:,2));
-                val{eleID} = sum((err.^2) .* W);
-            end
-            L2_err = sqrt(sum(cell2mat(val)));
-        end
+        % % This function approximate the L2 error || u_true - u_hat ||L2.
+        % function L2_err = L2_error(obj, C)
+        %     arguments
+        %         obj
+        %         C = obj.C
+        %     end
+        %     elements = obj.gm.Mesh.Elements;
+        %     nodes = obj.gm.Mesh.Nodes;
+        %     N = size(elements,2);
+        %     val = cell(1,N);
+        %     abserr = @(x,y) obj.abs_error(x,y,C);
+        % 
+        %     parfor eleID = 1:N
+        %         v_globID = elements(:,eleID) ;
+        %         v = nodes(:,v_globID)' ;
+        %         [XY, W] = simplexquad(2,v);
+        %         err = abserr(XY(:,1), XY(:,2));
+        %         val{eleID} = sum((err.^2) .* W);
+        %     end
+        %     L2_err = sqrt(sum(cell2mat(val)));
+        % end
 
 
         % This function construct uniform X, Y grids for solution evaluation and visualization.
